@@ -4,99 +4,78 @@ const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// simple cache
-const cache = new Map();
-const CACHE_TIME = 60000;
-
-// helper
 async function fetchJSON(url) {
     const res = await fetch(url);
     if (!res.ok) throw new Error("Request failed: " + res.status);
-    return await res.json();
+    return res.json();
 }
 
-// get universes owned by user
-async function getUniverses(userId) {
-    const url = `https://games.roblox.com/v2/users/${userId}/games?accessFilter=2&limit=50&sortOrder=Asc`;
+// get user's places
+async function getUserPlaces(userId) {
+    const url = `https://games.roblox.com/v2/users/${userId}/games?accessFilter=2&limit=50`;
     const data = await fetchJSON(url);
 
-    if (!data || !data.data) return [];
+    if (!data.data) return [];
 
-    return data.data.map(game => game.id);
+    return data.data.map(game => game.rootPlace.id);
 }
 
-// get gamepasses from a universe
-async function getGamepasses(universeId) {
-    let passes = [];
-    let cursor = "";
-
-    do {
-        const url = `https://games.roblox.com/v1/games/${universeId}/game-passes?limit=100&cursor=${cursor}`;
-        const data = await fetchJSON(url);
-
-        if (!data || !data.data) break;
-
-        passes = passes.concat(
-            data.data
-                .filter(p => p.price !== null)
-                .map(p => ({
-                    id: p.id,
-                    name: p.name,
-                    price: p.price
-                }))
-        );
-
-        cursor = data.nextPageCursor;
-    } while (cursor);
-
-    return passes;
+// convert place -> universe
+async function getUniverse(placeId) {
+    const url = `https://apis.roblox.com/universes/v1/places/${placeId}/universe`;
+    const data = await fetchJSON(url);
+    return data.universeId;
 }
 
-// root route
-app.get("/", (req, res) => {
-    res.send("Universe Donation Proxy Running");
+// get passes from universe
+async function getPasses(universeId) {
+    const url = `https://games.roblox.com/v1/games/${universeId}/game-passes?limit=100`;
+    const data = await fetchJSON(url);
+
+    if (!data.data) return [];
+
+    return data.data
+        .filter(p => p.price !== null)
+        .map(p => ({
+            id: p.id,
+            name: p.name,
+            price: p.price
+        }));
+}
+
+app.get("/", (req,res)=>{
+    res.send("Donation proxy running");
 });
 
-// main route
-app.get("/gamepasses/:userid", async (req, res) => {
-    const userId = req.params.userid;
+app.get("/gamepasses/:userid", async (req,res)=>{
+    try{
+        const userId = req.params.userid;
 
-    if (cache.has(userId)) {
-        const entry = cache.get(userId);
-        if (Date.now() - entry.time < CACHE_TIME) {
-            return res.json(entry.data);
-        }
-    }
-
-    try {
-        const universes = await getUniverses(userId);
+        const places = await getUserPlaces(userId);
 
         let allPasses = [];
 
-        const promises = universes.map(u => getGamepasses(u));
-        const results = await Promise.all(promises);
+        for (const placeId of places) {
+            const universeId = await getUniverse(placeId);
+            const passes = await getPasses(universeId);
+            allPasses = allPasses.concat(passes);
+        }
 
-        results.forEach(list => {
-            allPasses = allPasses.concat(list);
+        allPasses.sort((a,b)=>a.price-b.price);
+
+        res.json({
+            success:true,
+            passes:allPasses
         });
 
-        allPasses.sort((a, b) => a.price - b.price);
-
-        const response = {
-            success: true,
-            passes: allPasses
-        };
-
-        cache.set(userId, { time: Date.now(), data: response });
-
-        res.json(response);
-
-    } catch (err) {
-        console.log(err);
-        res.json({ success: false, passes: [] });
+    } catch(err) {
+        res.json({
+            success:false,
+            error:err.toString()
+        });
     }
 });
 
-app.listen(PORT, () => {
-    console.log("Proxy running on port " + PORT);
+app.listen(PORT, ()=>{
+    console.log("Proxy running on port "+PORT);
 });
