@@ -1,141 +1,102 @@
-const express = require("express")
-const fetch = require("node-fetch")
+const express = require("express");
+const fetch = require("node-fetch");
 
-const app = express()
-const PORT = process.env.PORT || 3000
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-// cache system
-const cache = new Map()
-const CACHE_TIME = 60 * 1000 // 1 minute
+// simple cache
+const cache = new Map();
+const CACHE_TIME = 60000;
 
+// helper
 async function fetchJSON(url) {
-
-    const res = await fetch(url)
-
-    if (!res.ok) {
-        throw new Error("Request failed: " + res.status)
-    }
-
-    return await res.json()
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Request failed: " + res.status);
+    return await res.json();
 }
 
-// get user games
-async function getUserGames(userId) {
+// get universes owned by user
+async function getUniverses(userId) {
+    const url = `https://games.roblox.com/v2/users/${userId}/games?accessFilter=2&limit=50&sortOrder=Asc`;
+    const data = await fetchJSON(url);
 
-    let games = []
-    let cursor = ""
+    if (!data || !data.data) return [];
 
-    do {
-
-        const url =
-        `https://games.roblox.com/v2/users/${userId}/games?accessFilter=Public&limit=50&cursor=${cursor}`
-
-        const data = await fetchJSON(url)
-
-        games = games.concat(data.data)
-        cursor = data.nextPageCursor
-
-    } while (cursor)
-
-    return games
+    return data.data.map(game => game.id);
 }
 
 // get gamepasses from a universe
 async function getGamepasses(universeId) {
-
-    let passes = []
-    let cursor = ""
+    let passes = [];
+    let cursor = "";
 
     do {
+        const url = `https://games.roblox.com/v1/games/${universeId}/game-passes?limit=100&cursor=${cursor}`;
+        const data = await fetchJSON(url);
 
-        const url =
-        `https://games.roblox.com/v1/games/${universeId}/game-passes?limit=100&cursor=${cursor}`
+        if (!data || !data.data) break;
 
-        const data = await fetchJSON(url)
+        passes = passes.concat(
+            data.data
+                .filter(p => p.price !== null)
+                .map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    price: p.price
+                }))
+        );
 
-        passes = passes.concat(data.data)
-        cursor = data.nextPageCursor
+        cursor = data.nextPageCursor;
+    } while (cursor);
 
-    } while (cursor)
-
-    return passes
+    return passes;
 }
 
+// root route
+app.get("/", (req, res) => {
+    res.send("Universe Donation Proxy Running");
+});
+
+// main route
 app.get("/gamepasses/:userid", async (req, res) => {
+    const userId = req.params.userid;
 
-    const userId = req.params.userid
-
-    // return cached result
     if (cache.has(userId)) {
-
-        const cached = cache.get(userId)
-
-        if (Date.now() - cached.time < CACHE_TIME) {
-            return res.json(cached.data)
+        const entry = cache.get(userId);
+        if (Date.now() - entry.time < CACHE_TIME) {
+            return res.json(entry.data);
         }
-
     }
 
     try {
+        const universes = await getUniverses(userId);
 
-        const games = await getUserGames(userId)
+        let allPasses = [];
 
-        const universeIds = games.map(g => g.id)
-
-        // fetch passes in parallel
-        const requests = universeIds.map(id => getGamepasses(id))
-        const results = await Promise.all(requests)
-
-        let passes = []
+        const promises = universes.map(u => getGamepasses(u));
+        const results = await Promise.all(promises);
 
         results.forEach(list => {
+            allPasses = allPasses.concat(list);
+        });
 
-            list.forEach(pass => {
-
-                if (pass.price !== null) {
-
-                    passes.push({
-                        id: pass.id,
-                        name: pass.name,
-                        price: pass.price
-                    })
-
-                }
-
-            })
-
-        })
-
-        // sort by price
-        passes.sort((a, b) => a.price - b.price)
+        allPasses.sort((a, b) => a.price - b.price);
 
         const response = {
             success: true,
-            passes: passes
-        }
+            passes: allPasses
+        };
 
-        cache.set(userId, {
-            time: Date.now(),
-            data: response
-        })
+        cache.set(userId, { time: Date.now(), data: response });
 
-        res.json(response)
+        res.json(response);
 
     } catch (err) {
-
-        res.status(500).json({
-            success: false,
-            error: err.toString()
-        })
-
+        console.log(err);
+        res.json({ success: false, passes: [] });
     }
-
-})
-
-app.get("/", (req,res)=>{
-    res.send("Donation Proxy Running")
-})
+});
 
 app.listen(PORT, () => {
-    console.log("Proxy running on port", PORT)
-})
+    console.log("Proxy running on port " + PORT);
+});
